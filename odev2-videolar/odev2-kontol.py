@@ -19,8 +19,8 @@ def sonuclariKarsilastir(matrix1, matrix2):
                 same_count += 1
     return same_count
 
-dosya1 = "tusas-odev2-referans.txt"
-dosya2 = "tusas-odev2-ogr.txt"
+dosya1 = "tusas-odev2-referans1.txt"
+dosya2 = "tusas-odev2-ogr1.txt"
 
 sonuc_ref = dosyalariOku(dosya1)
 sonuc_ogr = dosyalariOku(dosya2)
