@@ -156,13 +156,22 @@ def main():
     cap.release()
     cv2.destroyAllWindows()
 
-    # TXT çıktısı (istenen sırada)
+    # TXT çıktısı (istenen sırada ve formatta)
     with open(OUTPUT_TXT, "w") as f:
-        for i in range(SECONDS):
-            line = "\t".join(str(motion_matrix[i][j]) for j in txt_order)
-            f.write(f"{i+1})\t{line}\n")
+        # Başlık (hedef formatla aynı)
+        f.write("Saniye\tRobot-1 Robot-2 Robot-3 Robot-4 Robot-5 Robot-6 Robot-7 Robot-8 Robot-9\n")
 
-    print(f"[INFO] TXT çıktısı tamamlandı: {OUTPUT_TXT}")
+        for i in range(SECONDS):
+            # 1. Her bir değeri 4 karakter genişliğinde sağa hizalı string olarak formatla
+            formatted_values = [f"{motion_matrix[i][j]:>4}" for j in range(9)]
+
+            # 2. Bu formatlanmış stringleri aralarına "\t" (tab) koyarak birleştir
+            line_data = "\t".join(formatted_values)
+
+            # 3. Satır numarasını formatla, ilk tabı ekle ve birleştirilmiş veriyi ekle
+            f.write(f"{i+1:3})\t{line_data}\n") # Satır numarasından sonra zaten bir tab var
+
+        print(f"[INFO] TXT çıktısı tamamlandı: {OUTPUT_TXT}")
 
 if __name__ == "__main__":
     main()
