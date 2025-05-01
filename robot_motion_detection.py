@@ -8,16 +8,14 @@ OUTPUT_TXT = "odev2-videolar/tusas-odev2-ogr1.txt"
 SECONDS = 60
 GRID_ROWS, GRID_COLS = 3, 3
 
-FLOW_STD_BOOST = 1.0
-MOTION_RATIO = 0.2
-PADDING_RATIO = 0.1
+HARRIS_DIFF_THRESHOLD = 7
+MOTION_RATIO = 0.2  # %20
 
 txt_order_mapping = {
     0: 7, 1: 1, 2: 4,
     3: 8, 4: 2, 5: 5,
     6: 9, 7: 3, 8: 6
 }
-
 display_index_map = txt_order_mapping
 
 def fixed_perspective_rectify(frame):
@@ -39,35 +37,53 @@ def fixed_perspective_rectify(frame):
 
 def split_cells(frame):
     h, w = frame.shape[:2]
-    cell_h = h / GRID_ROWS
-    cell_w = w / GRID_COLS
+    cell_h = h // GRID_ROWS
+    cell_w = w // GRID_COLS
     cells = []
     for i in range(GRID_ROWS):
         for j in range(GRID_COLS):
-            x1 = int(round(j * cell_w))
-            y1 = int(round(i * cell_h))
-            x2 = int(round((j + 1) * cell_w))
-            y2 = int(round((i + 1) * cell_h))
+            x1 = j * cell_w
+            y1 = i * cell_h
+            x2 = x1 + cell_w
+            y2 = y1 + cell_h
             cells.append((x1, y1, x2, y2))
     return cells
 
-def get_robot_regions(cells, padding_ratio=0.1):
-    regions = []
-    for (x1, y1, x2, y2) in cells:
-        w = x2 - x1
-        h = y2 - y1
-        pad_w = int(w * padding_ratio)
-        pad_h = int(h * padding_ratio)
-        regions.append((x1 + pad_w, y1 + pad_h, x2 - pad_w, y2 - pad_h))
-    return regions
+def detect_drop_start(video_path, threshold=500000):
+    cap = cv2.VideoCapture(video_path)
+    prev_gray = None
+    frame_index = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        if prev_gray is not None:
+            diff = cv2.absdiff(gray, prev_gray)
+            motion_score = np.sum(diff)
+            if motion_score > threshold:
+                cap.release()
+                return frame_index
+        prev_gray = gray
+        frame_index += 1
+    cap.release()
+    return 0
+
+def harris_score(gray):
+    blurred = cv2.GaussianBlur(gray, (5, 5), 1)
+    dst = cv2.cornerHarris(np.float32(blurred), 2, 3, 0.04)
+    dst = cv2.dilate(dst, None)
+    corners = dst > 0.01 * dst.max()
+    return np.sum(corners)
 
 def main():
     cap = cv2.VideoCapture(VIDEO_PATH)
-    if not cap.isOpened():
-        print("[ERROR] Video açılamadı.")
-        return
-
     fps = cap.get(cv2.CAP_PROP_FPS)
+    drop_start = detect_drop_start(VIDEO_PATH)
+    print(f"[INFO] Robot düşme sonrası başlangıç frame: {drop_start}")
+    cap.set(cv2.CAP_PROP_POS_FRAMES, drop_start)
+
     ret, first_frame = cap.read()
     if not ret:
         print("[ERROR] İlk frame alınamadı.")
@@ -75,13 +91,16 @@ def main():
 
     first_frame = fixed_perspective_rectify(first_frame)
     cells = split_cells(first_frame)
-    robot_regions = get_robot_regions(cells, padding_ratio=PADDING_RATIO)
-    prev_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
 
-    buffer = [[] for _ in range(9)]
     motion_matrix = np.zeros((SECONDS, 9), dtype=int)
+    frame_buffer = [[] for _ in range(9)]
+    prev_scores = [None for _ in range(9)]
+    frame_idx = 0
 
-    for frame_idx in range(int(fps * SECONDS)):
+    cv2.namedWindow("Robot Harris Detection", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Robot Harris Detection", 720, 720)
+
+    while frame_idx < int(fps * SECONDS):
         ret, frame = cap.read()
         if not ret:
             break
@@ -89,45 +108,40 @@ def main():
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         second = int(frame_idx / fps)
 
-        for i, (x1, y1, x2, y2) in enumerate(robot_regions):
-            roi_prev = prev_gray[y1:y2, x1:x2]
-            roi_curr = gray[y1:y2, x1:x2]
-            if roi_prev.shape != roi_curr.shape or roi_prev.size == 0:
-                continue
-            flow = cv2.calcOpticalFlowFarneback(roi_prev, roi_curr, None,
-                                                0.5, 3, 15, 3, 5, 1.2, 0)
-            mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
-            score = np.mean(mag) + FLOW_STD_BOOST * np.std(mag)
-            buffer[i].append(score)
+        for i, (x1, y1, x2, y2) in enumerate(cells):
+            roi = gray[y1:y2, x1:x2]
+            score = harris_score(roi)
+            if prev_scores[i] is not None:
+                diff = abs(score - prev_scores[i])
+                frame_buffer[i].append(1 if diff > HARRIS_DIFF_THRESHOLD else 0)
+            prev_scores[i] = score
 
-            color = (0, 255, 0) if score > 0.15 else (0, 0, 255)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
+        if frame_idx % int(fps) == 0 and frame_idx > 0:
+            sec = int(frame_idx / fps) - 1
+            for i in range(9):
+                ratio = sum(frame_buffer[i]) / len(frame_buffer[i])
+                if ratio >= MOTION_RATIO:
+                    motion_matrix[sec][i] = 1
+            frame_buffer = [[] for _ in range(9)]
+
+        for i, (x1, y1, x2, y2) in enumerate(cells):
+            if len(frame_buffer[i]) > 0 and frame_buffer[i][-1] == 1:
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            else:
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
             cv2.putText(frame, str(display_index_map[i]), (x1 + 5, y1 + 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
-        prev_gray = gray.copy()
-
-        next_sec = int((frame_idx + 1) / fps)
-        if next_sec > second or frame_idx == int(fps * SECONDS) - 1:
-            for i in range(9):
-                scores = buffer[i]
-                if scores:
-                    mean_score = np.mean(scores)
-                    if mean_score > 0.15:
-                        motion_matrix[second][i] = 1
-            buffer = [[] for _ in range(9)]
-
-        cv2.imshow("Robot Hareket Algılama", frame)
+        cv2.imshow("Robot Harris Detection", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
+
+        frame_idx += 1
 
     cap.release()
     cv2.destroyAllWindows()
 
-    output_dir = os.path.dirname(OUTPUT_TXT)
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
+    # TXT çıktısı (istenen formatta)
     output_motion_matrix = np.zeros((SECONDS, 9), dtype=int)
     for internal_idx in range(9):
         txt_col_idx = txt_order_mapping[internal_idx] - 1
