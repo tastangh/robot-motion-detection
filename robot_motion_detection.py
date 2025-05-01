@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import os
 
+# === Ayarlar ===
 VIDEO_PATH = "odev2-videolar/tusas-odev2-test1.mp4"
 OUTPUT_TXT = "odev2-videolar/tusas-odev2-ogr1.txt"
 SECONDS = 60
@@ -9,17 +10,15 @@ GRID_ROWS, GRID_COLS = 3, 3
 
 FLOW_STD_BOOST = 1.0
 MOTION_RATIO = 0.2
-
-camera_matrix = np.array([[800, 0, 320],
-                          [0, 800, 240],
-                          [0,   0,   1]], dtype=np.float32)
-dist_coeffs = np.array([-0.25, 0.1, 0.0, 0.0, 0.0], dtype=np.float32)
+PADDING_RATIO = 0.1
 
 txt_order_mapping = {
     0: 7, 1: 1, 2: 4,
     3: 8, 4: 2, 5: 5,
     6: 9, 7: 3, 8: 6
 }
+
+display_index_map = txt_order_mapping
 
 def undistort_frame(frame, K, dist):
     h, w = frame.shape[:2]
@@ -28,87 +27,82 @@ def undistort_frame(frame, K, dist):
     x, y, w, h = roi
     return dst[y:y+h, x:x+w]
 
-def detect_drop_frame(cap, K, dist):
-    history = []
-    frame_idx = 0
-    stable_threshold = 100000
-    diff_peak_threshold = 200000
-    frames_to_check_stability = 15
+def auto_perspective_rectify(frame, grid_size=(3, 3)):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blur, 50, 150)
 
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            return 0
-        frame_undistorted = undistort_frame(frame, K, dist)
-        gray = cv2.cvtColor(frame_undistorted, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-        if history:
-            diff = cv2.absdiff(history[-1], gray)
-            score = np.sum(diff)
-            if score > diff_peak_threshold:
-                stable_counter = 0
-                current_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
-                for _ in range(frames_to_check_stability):
-                    ret2, f2 = cap.read()
-                    if not ret2:
-                        break
-                    g2 = cv2.cvtColor(undistort_frame(f2, K, dist), cv2.COLOR_BGR2GRAY)
-                    g2 = cv2.GaussianBlur(g2, (5, 5), 0)
-                    d2 = cv2.absdiff(gray, g2)
-                    s2 = np.sum(d2)
-                    if s2 < stable_threshold:
-                        stable_counter += 1
-                    else:
-                        break
-                cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
-                if stable_counter >= frames_to_check_stability - 2:
-                    return frame_idx
-        history.append(gray)
-        if len(history) > 20:
-            history.pop(0)
-        frame_idx += 1
-        if frame_idx > cap.get(cv2.CAP_PROP_FRAME_COUNT) * 0.25:
-            return 0
+    squares = []
+    for cnt in contours:
+        approx = cv2.approxPolyDP(cnt, 0.02 * cv2.arcLength(cnt, True), True)
+        if len(approx) == 4 and cv2.contourArea(cnt) > 1000:
+            squares.append(approx.reshape(-1, 2))
+
+    if len(squares) < 9:
+        # print("[WARN] Yeterli kare tespit edilemedi.")
+        return frame
+
+    centers = [np.mean(sq, axis=0) for sq in squares]
+    sorted_squares = [sq for _, sq in sorted(zip(centers, squares), key=lambda x: (x[0][1], x[0][0]))]
+
+    ul = sorted_squares[0][0]
+    ur = sorted_squares[2][1]
+    lr = sorted_squares[-1][2]
+    ll = sorted_squares[-3][3]
+
+    src_pts = np.float32([ul, ur, lr, ll])
+    dst_pts = np.float32([
+        [0, 0],
+        [360, 0],
+        [360, 360],
+        [0, 360]
+    ])
+
+    H = cv2.getPerspectiveTransform(src_pts, dst_pts)
+    rectified = cv2.warpPerspective(frame, H, (360, 360))
+    return rectified
 
 def split_cells(frame):
     h, w = frame.shape[:2]
-    cell_h = h // GRID_ROWS
-    cell_w = w // GRID_COLS
-    return [(j*cell_w, i*cell_h, (j+1)*cell_w, (i+1)*cell_h)
-            for i in range(GRID_ROWS) for j in range(GRID_COLS)]
+    cell_h = h / GRID_ROWS
+    cell_w = w / GRID_COLS
+    cells = []
+    for i in range(GRID_ROWS):
+        for j in range(GRID_COLS):
+            x1 = int(round(j * cell_w))
+            y1 = int(round(i * cell_h))
+            x2 = int(round((j + 1) * cell_w))
+            y2 = int(round((i + 1) * cell_h))
+            cells.append((x1, y1, x2, y2))
+    return cells
 
-def get_robot_regions(cells, scale=0.8):
+def get_robot_regions(cells, padding_ratio=0.1):
     regions = []
     for (x1, y1, x2, y2) in cells:
-        cx, cy = (x1 + x2)//2, (y1 + y2)//2
-        w, h = int((x2 - x1) * scale), int((y2 - y1) * scale)
-        regions.append((cx - w//2, cy - h//2, cx + w//2, cy + h//2))
+        w = x2 - x1
+        h = y2 - y1
+        pad_w = int(w * padding_ratio)
+        pad_h = int(h * padding_ratio)
+        regions.append((x1 + pad_w, y1 + pad_h, x2 - pad_w, y2 - pad_h))
     return regions
 
 def main():
-    global SECONDS
     cap = cv2.VideoCapture(VIDEO_PATH)
     if not cap.isOpened():
         print("[ERROR] Video açılamadı.")
         return
 
     fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    drop_start = detect_drop_frame(cap, camera_matrix, dist_coeffs)
-    if drop_start + int(fps * SECONDS) > total_frames:
-        SECONDS = int((total_frames - drop_start) / fps)
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, drop_start)
     ret, first_frame = cap.read()
     if not ret:
         print("[ERROR] İlk frame alınamadı.")
         return
 
-    first_frame = undistort_frame(first_frame, camera_matrix, dist_coeffs)
+    first_frame = auto_perspective_rectify(first_frame)
     cells = split_cells(first_frame)
-    robot_regions = get_robot_regions(cells)
+    robot_regions = get_robot_regions(cells, padding_ratio=PADDING_RATIO)
     prev_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
 
     buffer = [[] for _ in range(9)]
@@ -118,7 +112,7 @@ def main():
         ret, frame = cap.read()
         if not ret:
             break
-        frame = undistort_frame(frame, camera_matrix, dist_coeffs)
+        frame = auto_perspective_rectify(frame)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         second = int(frame_idx / fps)
 
@@ -134,7 +128,9 @@ def main():
             buffer[i].append(score)
 
             color = (0, 255, 0) if score > 0.15 else (0, 0, 255)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
+            cv2.putText(frame, str(display_index_map[i]), (x1 + 5, y1 + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         prev_gray = gray.copy()
 
