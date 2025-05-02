@@ -156,7 +156,6 @@ def main():
         fps = 30
 
     total_frames_to_process = int(fps * SECONDS)
-    print(f"[INFO] Video FPS: {fps:.2f}, Processing {SECONDS} seconds ({total_frames_to_process} frames).")
 
     drop_end_frame = detect_drop_start(VIDEO_PATH, threshold=300000, check_frames=int(fps*5))
     print(f"[INFO] Starting processing from frame index: {drop_end_frame}")
@@ -231,7 +230,6 @@ def main():
         if processed_frame_count > 0 and processed_frame_count % int(fps) == 0:
             sec_index = current_second
             if sec_index < SECONDS:
-                print(f"[INFO] Processing end of second {sec_index + 1}")
                 for i in range(9):
                     if len(frame_motion_buffer[i]) > 0:
                         ratio = sum(frame_motion_buffer[i]) / len(frame_motion_buffer[i])
