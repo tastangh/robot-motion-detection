@@ -2,14 +2,15 @@ import cv2
 import numpy as np
 import os
 
-# === Ayarlar ===
-VIDEO_PATH = "odev2-videolar/tusas-odev2-test1.mp4"
-OUTPUT_TXT = "odev2-videolar/tusas-odev2-ogr1.txt"
+VIDEO_PATH = os.getenv("VIDEO_PATH", "odev2-videolar/tusas-odev2-test1.mp4")
+OUTPUT_TXT = os.getenv("OUTPUT_TXT", "odev2-videolar/tusas-odev2-ogr1.txt")
 SECONDS = 60
 GRID_ROWS, GRID_COLS = 3, 3
 
-HARRIS_DIFF_THRESHOLD = 7
+HARRIS_DIFF_THRESHOLD = 9
 MOTION_RATIO = 0.2  # %20
+
+homography_matrix = None
 
 txt_order_mapping = {
     0: 7, 1: 1, 2: 4,
@@ -18,22 +19,30 @@ txt_order_mapping = {
 }
 display_index_map = txt_order_mapping
 
-def fixed_perspective_rectify(frame):
-    h, w = frame.shape[:2]
-    src_pts = np.float32([
-        [70, 50],
-        [w - 70, 50],
-        [w - 70, h - 60],
-        [70, h - 60]
-    ])
-    dst_pts = np.float32([
-        [0, 0],
-        [360, 0],
-        [360, 360],
-        [0, 360]
-    ])
+def get_auto_perspective_transform(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    corners = cv2.goodFeaturesToTrack(gray, maxCorners=100, qualityLevel=0.01, minDistance=30)
+
+    if corners is None or len(corners) < 4:
+        raise RuntimeError("[FATAL] Otomatik rectification için yeterli köşe bulunamadı!")
+
+    corners = corners.astype(int).reshape(-1, 2)
+
+    top_left = min(corners, key=lambda x: x[0] + x[1])
+    top_right = min(corners, key=lambda x: -x[0] + x[1])
+    bottom_right = max(corners, key=lambda x: x[0] + x[1])
+    bottom_left = max(corners, key=lambda x: -x[0] + x[1])
+
+    src_pts = np.float32([top_left, top_right, bottom_right, bottom_left])
+    dst_pts = np.float32([[0, 0], [360, 0], [360, 360], [0, 360]])
     H = cv2.getPerspectiveTransform(src_pts, dst_pts)
-    return cv2.warpPerspective(frame, H, (360, 360))
+    return H
+
+def fixed_perspective_rectify(frame):
+    global homography_matrix
+    if homography_matrix is None:
+        homography_matrix = get_auto_perspective_transform(frame)
+    return cv2.warpPerspective(frame, homography_matrix, (360, 360))
 
 def split_cells(frame):
     h, w = frame.shape[:2]
