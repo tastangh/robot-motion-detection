@@ -4,12 +4,12 @@ import os
 import time
 
 VIDEO_PATH = os.getenv("VIDEO_PATH", "odev2-videolar/tusas-odev2-test3.mp4")
-OUTPUT_TXT = os.getenv("OUTPUT_TXT", "odev2-videolar/tusas-odev2-ogr3.txt")
+OUTPUT_TXT = os.getenv("OUTPUT_TXT", "odev2-videolar/tusas-odev2-test3-ogr.txt")
 SECONDS = 60
 GRID_ROWS, GRID_COLS = 3, 3
 TARGET_SIZE = (360, 360)
 
-HARRIS_DIFF_THRESHOLD = 6
+HARRIS_DIFF_THRESHOLD = 9
 MOTION_RATIO = 0.2
 
 last_successful_homography = None
