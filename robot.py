@@ -7,127 +7,150 @@ NUM_SECONDS = 60
 NUM_ROBOTS = 9
 MOTION_THRESHOLD_RATIO = 0.2
 
-# Optimize edilmiş robot bazlı eşik değerleri
 ROBOT_THRESHOLDS = [
-    0.0015,  # Robot 1
-    0.0017,  # Robot 2
-    0.0012,  # Robot 3
-    0.0016,  # Robot 4
-    0.0016,  # Robot 5
-    0.0015,  # Robot 6
-    0.0013,  # Robot 7
-    0.0015,  # Robot 8
-    0.0013   # Robot 9
+    0.0010, 0.0012, 0.0012,
+    0.0012, 0.0012, 0.0010,
+    0.0008, 0.0011, 0.0009
 ]
 
-# Fiziksel sıralama: Orta üst, sağ üst, sol üst, orta orta, sağ orta, sol orta, orta alt, sağ alt, sol alt
 OUTPUT_ORDER = [1, 4, 7, 2, 5, 8, 0, 3, 6]
+
+
+def rectify_frame(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray_blur = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    corners = cv2.goodFeaturesToTrack(gray_blur, maxCorners=100, qualityLevel=0.01, minDistance=30)
+    if corners is None or len(corners) < 4:
+        print("[WARN] Yeterli köşe bulunamadı!")
+        return frame
+
+    corners = corners.astype(np.intp).reshape(-1, 2)
+
+    # Sadece dış dört köşe ile transform yap
+    rect = np.zeros((4, 2), dtype="float32")
+    s = corners.sum(axis=1)
+    rect[0] = corners[np.argmin(s)]  # top-left
+    rect[2] = corners[np.argmax(s)]  # bottom-right
+
+    diff = np.diff(corners, axis=1)
+    rect[1] = corners[np.argmin(diff)]  # top-right
+    rect[3] = corners[np.argmax(diff)]  # bottom-left
+
+    dst = np.array([
+        [0, 0],
+        [900, 0],
+        [900, 900],
+        [0, 900]
+    ], dtype="float32")
+
+    M = cv2.getPerspectiveTransform(rect, dst)
+    warped = cv2.warpPerspective(frame, M, (900, 900))
+    return warped
+
 
 def get_grid_cells(frame):
     h, w = frame.shape[:2]
-    cell_h, cell_w = h // 3, w // 3
-    cells = []
-    for i in range(3):
-        for j in range(3):
-            y1, y2 = i * cell_h, (i + 1) * cell_h
-            x1, x2 = j * cell_w, (j + 1) * cell_w
-            cells.append((x1, y1, x2, y2))
-    return cells
+    ch, cw = h // 3, w // 3
+    return [(j * cw, i * ch, (j + 1) * cw, (i + 1) * ch) for i in range(3) for j in range(3)]
 
-def detect_fall_start_frame(cap, max_frames=150, threshold=0.01, min_global_change=6):
-    print("[INFO] Düşüş başlangıcı (ani hareket) tespiti başlatılıyor...")
-    ret, prev_frame = cap.read()
-    if not ret:
+
+def detect_drop_start(video_path, threshold=500000, check_frames=150):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"[ERROR] Cannot open video file: {video_path}")
         return 0
-    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-    cells = get_grid_cells(prev_gray)
+    prev_gray = None
+    frame_index = 0
 
-    for i in range(1, max_frames):
+    while frame_index < check_frames:
         ret, frame = cap.read()
         if not ret:
             break
+        frame = rectify_frame(frame)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (21, 21), 0)
 
-        active_cells = 0
-        for (x1, y1, x2, y2) in cells:
-            prev_roi = prev_gray[y1:y2, x1:x2]
-            curr_roi = gray[y1:y2, x1:x2]
-            diff = cv2.absdiff(prev_roi, curr_roi)
-            _, thresh = cv2.threshold(diff, 20, 255, cv2.THRESH_BINARY)
-            motion = np.sum(thresh) / 255
-            ratio = motion / (curr_roi.shape[0] * curr_roi.shape[1])
-            if ratio > threshold:
-                active_cells += 1
-
-        if active_cells >= min_global_change:
-            print(f"[INFO] Düşüş başladığı kare: {i}")
-            return i
+        if prev_gray is not None:
+            diff = cv2.absdiff(gray, prev_gray)
+            motion_score = np.sum(diff)
+            if motion_score > threshold:
+                print(f"[INFO] Düşüş sonrası büyük hareket {frame_index}. karede tespit edildi.")
+                cap.release()
+                frame_count = 0
+                temp_cap = cv2.VideoCapture(video_path)
+                if temp_cap.isOpened():
+                    frame_count = int(temp_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    temp_cap.release()
+                return min(frame_index + 5, frame_count - 1) if frame_count else frame_index + 5
 
         prev_gray = gray
+        frame_index += 1
 
-    print("[WARN] Düşüş başlangıcı tespit edilemedi. 0'a ayarlandı.")
+    print("[INFO] Belirgin bir düşme hareketi tespit edilemedi, baştan başlanacak.")
+    cap.release()
     return 0
+
 
 def detect_motion(prev_gray, curr_gray, epsilon):
     diff = cv2.absdiff(prev_gray, curr_gray)
-    blurred = cv2.GaussianBlur(diff, (5, 5), 0)  # Gürültü azalt
-    _, thresh = cv2.threshold(blurred, 25, 255, cv2.THRESH_BINARY)
+    _, thresh = cv2.threshold(diff, 20, 255, cv2.THRESH_BINARY)
     motion_pixels = np.sum(thresh) / 255
     area = prev_gray.shape[0] * prev_gray.shape[1]
     motion_ratio = motion_pixels / area
     return motion_ratio > epsilon
 
+
 def main():
     cap = cv2.VideoCapture(VIDEO_PATH)
     if not cap.isOpened():
-        print("Video açılamadı.")
+        print("❌ Video açılamadı.")
         return
 
     FPS = int(cap.get(cv2.CAP_PROP_FPS))
     total_frames = NUM_SECONDS * FPS
     print(f"[INFO] FPS: {FPS}")
 
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    fall_frame = detect_fall_start_frame(cap)
-    fall_frame = max(0, fall_frame - 5)
-    print(f"[INFO] Düşüş başlangıcı (düzenlenmiş): {fall_frame}")
-    cap.set(cv2.CAP_PROP_POS_FRAMES, fall_frame)
+    fall_frame = detect_drop_start(VIDEO_PATH)
+    start_frame = max(0, fall_frame - 1)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-    ret, frame = cap.read()
+    ret, prev_frame = cap.read()
     if not ret:
-        print("Başlangıç karesi okunamadı.")
+        print("❌ Başlangıç karesi alınamadı.")
         return
 
-    cells = get_grid_cells(frame)
-    prev_rois = [None] * NUM_ROBOTS
+    prev_frame = rectify_frame(prev_frame)
+    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+    cells = get_grid_cells(prev_gray)
+    prev_rois = [prev_gray[y1:y2, x1:x2] for (x1, y1, x2, y2) in cells]
     motion_log = [[] for _ in range(NUM_ROBOTS)]
-    frame_idx = 0
 
+    frame_idx = 1
     while frame_idx < total_frames:
         ret, frame = cap.read()
         if not ret:
             break
+        frame = rectify_frame(frame)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         for idx, (x1, y1, x2, y2) in enumerate(cells):
             roi = gray[y1:y2, x1:x2]
-            if prev_rois[idx] is not None:
-                moved = detect_motion(prev_rois[idx], roi, epsilon=ROBOT_THRESHOLDS[idx])
-                motion_log[idx].append(1 if moved else 0)
-                if moved:
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            moved = detect_motion(prev_rois[idx], roi, epsilon=ROBOT_THRESHOLDS[idx])
+            motion_log[idx].append(1 if moved else 0)
+            if moved:
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             prev_rois[idx] = roi
 
-        cv2.imshow("Robot Hareket Algılama", frame)
-        if cv2.waitKey(1) & 0xFF == 27:
-            break
+        # cv2.imshow("Motion Detection", frame)
+        # if cv2.waitKey(1) & 0xFF == 27:
+        #     break
 
         frame_idx += 1
 
     cap.release()
     cv2.destroyAllWindows()
 
-    print("[INFO] Hareketler .txt dosyasına yazılıyor...")
     with open(OUTPUT_TXT, 'w') as f:
         header = "Saniye\t" + "\t".join([f"Robot-{i+1}" for i in range(NUM_ROBOTS)])
         f.write(header + '\n')
@@ -142,6 +165,7 @@ def main():
             f.write(line + '\n')
 
     print(f"[✅ TAMAMLANDI] Sonuç dosyası yazıldı: {OUTPUT_TXT}")
+
 
 if __name__ == '__main__':
     main()
