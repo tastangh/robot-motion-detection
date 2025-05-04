@@ -342,25 +342,10 @@ def main():
             f.write("Saniye\t" + "\t".join([f"Robot-{i+1}" for i in range(9)]) + "\n")
             for i in range(SECONDS):
                 f.write(f"{i+1:<6}\t" + "\t".join(map(str, final_output_matrix[i])) + "\n")
-        print("[✅] Yazma tamamlandı.")
+        print("Yazma tamamlandı.")
     except IOError as e:
         print(f"[ERROR] Çıktı dosyasına yazılamadı {OUTPUT_TXT}: {e}")
 
-    ref_path = OUTPUT_TXT.replace("ogr", "referans")
-    if os.path.exists(ref_path):
-        print("-" * 30)
-        try:
-            from compare_outputs import compare_outputs
-            print(f"[INFO] Karşılaştırma başlıyor: {ref_path} vs {OUTPUT_TXT}")
-            compare_outputs(ref_path, OUTPUT_TXT)
-        except ImportError:
-            print("[HATA] 'compare_outputs' import edilemedi.")
-            print("       Otomatik karşılaştırma atlanıyor.")
-        except Exception as e:
-            print(f"[HATA] Karşılaştırma sırasında hata: {e}")
-        print("-" * 30)
-    else:
-        print(f"[UYARI] Referans dosyası bulunamadı: {ref_path}. Karşılaştırma atlanıyor.")
-
+   
 if __name__ == "__main__":
     main()
