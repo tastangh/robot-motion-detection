@@ -35,4 +35,4 @@ def compare_outputs(ref_path, student_path):
         print("🎉 Tüm eşleşmeler doğru!")
 
 if __name__ == "__main__":
-    compare_outputs("tusas-odev2-referans1.txt", "tusas-odev2-ogr.txt")
+    compare_outputs("odev2-videolar/tusas-odev2-referans1.txt", "odev2-videolar/tusas-odev2-ogr1.txt")
