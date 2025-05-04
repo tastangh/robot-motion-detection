@@ -10,11 +10,14 @@ SECONDS = 60
 GRID_ROWS, GRID_COLS = 3, 3
 TARGET_SIZE = (360, 360)
 
-ROBOT_THRESHOLDS = [
-    0.0010, 0.0012, 0.0012,
-    0.0012, 0.0012, 0.0010,
-    0.0008, 0.0011, 0.0009
-]
+HARRIS_BLOCK_SIZE = 2
+HARRIS_KSIZE = 3
+HARRIS_K = 0.04
+HARRIS_THRESHOLD_RATIO = 0.01
+HARRIS_DIFF_THRESHOLD = 5
+APPLY_BLUR_BEFORE_HARRIS = True
+HARRIS_BLUR_KERNEL = (3, 3)
+
 MOTION_SECOND_RATIO = 0.20
 
 txt_order_mapping = {0: 7, 1: 1, 2: 4, 3: 8, 4: 2, 5: 5, 6: 9, 7: 3, 8: 6}
@@ -23,37 +26,36 @@ display_index_map = {i: txt_order_mapping[i] for i in range(9)}
 last_successful_homography = None
 
 
-def detect_drop_start(video_path, threshold=500000, check_frames=150):
+def detect_drop_start(video_path, threshold=300000):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"[ERROR] Video açılamadı: {video_path}")
+        print(f"[ERROR] Video {video_path} açılamadı.")
         return 0
     prev_gray = None
-    frame_index = 0
+    frame_count = 0
+    max_frames_to_check = 200
 
     print("[INFO] Başlangıç karesi tespiti...")
-    while frame_index < check_frames:
+    while frame_count < max_frames_to_check:
         ret, frame = cap.read()
         if not ret:
             break
-
+        frame_count += 1
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (21, 21), 0)
 
         if prev_gray is not None:
-            diff = cv2.absdiff(gray, prev_gray)
-            motion_score = np.sum(diff)
-            if motion_score > threshold:
-                print(f"[INFO] Belirgin hareket {frame_index}. karede tespit edildi.")
+            diff = cv2.absdiff(prev_gray, gray)
+            score = np.sum(diff)
+            if score > threshold:
                 cap.release()
-                # Return frame index slightly after detection
-                return frame_index + 5
-
+                start_frame = frame_count + 5
+                print(f"[INFO] Belirgin hareket {frame_count}. kare civarında. Referans noktası: {start_frame}.")
+                return start_frame
         prev_gray = gray
-        frame_index += 1
 
-    print("[INFO] Belirgin bir düşme hareketi tespit edilemedi, baştan başlanacak.")
     cap.release()
+    print("[INFO] Başlangıçta belirgin hareket yok, 0. kare referans noktası.")
     return 0
 
 def get_homography(frame):
@@ -132,19 +134,24 @@ def split_grid(frame_shape):
             grid_coords.append((y1, y2, x1, x2))
     return grid_coords
 
-def detect_motion(prev_gray, curr_gray, epsilon):
-    if prev_gray is None or curr_gray is None:
-        return False
-    if prev_gray.shape != curr_gray.shape or prev_gray.size == 0:
-        return False # Cannot compare if shapes mismatch or empty
+def calculate_harris_score(gray_roi):
+    if gray_roi is None or gray_roi.size == 0:
+        return 0
 
-    diff = cv2.absdiff(prev_gray, curr_gray)
-    _, thresh = cv2.threshold(diff, 20, 255, cv2.THRESH_BINARY)
-    motion_pixels = np.sum(thresh) / 255.0 # Normalize pixel count
-    area = float(prev_gray.shape[0] * prev_gray.shape[1])
-    if area == 0: return False
-    motion_ratio = motion_pixels / area
-    return motion_ratio > epsilon
+    processed_roi = gray_roi
+    if APPLY_BLUR_BEFORE_HARRIS and HARRIS_BLUR_KERNEL is not None:
+        processed_roi = cv2.GaussianBlur(gray_roi, HARRIS_BLUR_KERNEL, 0)
+
+    gray_roi_float = np.float32(processed_roi)
+    dst = cv2.cornerHarris(gray_roi_float, HARRIS_BLOCK_SIZE, HARRIS_KSIZE, HARRIS_K)
+
+    max_val = dst.max()
+    if max_val <= 1e-6:
+        return 0
+
+    corner_count = np.sum(dst > HARRIS_THRESHOLD_RATIO * max_val)
+    return corner_count
+
 
 def main():
     global last_successful_homography
@@ -160,25 +167,35 @@ def main():
     else:
         print(f"[INFO] Video FPS: {fps}")
     frame_interval_ms = int(1000 / fps)
+    one_second_frames = int(round(fps))
 
     total_frames_to_process = int(fps * SECONDS)
-    drop_frame_index = detect_drop_start(VIDEO_PATH)
+    drop_ref_frame_index = detect_drop_start(VIDEO_PATH)
 
-    actual_start_frame = 0
-    if drop_frame_index > 0:
-        set_success = cap.set(cv2.CAP_PROP_POS_FRAMES, drop_frame_index)
+    # Calculate the effective start frame: drop reference + 1 second
+    effective_start_frame = drop_ref_frame_index + one_second_frames
+    print(f"[INFO] 1 saniye ({one_second_frames} kare) ekleniyor.")
+
+
+    if effective_start_frame > 0:
+        set_success = cap.set(cv2.CAP_PROP_POS_FRAMES, effective_start_frame)
         current_frame_check = cap.get(cv2.CAP_PROP_POS_FRAMES)
-        if not set_success or abs(current_frame_check - drop_frame_index) > 1:
-             print(f"[WARN] Kareye gitme başarısız ({drop_frame_index} istendi, {current_frame_check} alındı).")
-        actual_start_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-        print(f"[INFO] Analiz başlangıç karesi ayarlandı: {actual_start_frame}")
+        # Check if seek was successful, allow slight inaccuracy
+        if not set_success or abs(current_frame_check - effective_start_frame) > 1:
+             print(f"[WARN] Kareye gitme başarısız ({effective_start_frame} istendi, {current_frame_check} alındı).")
+        # Update effective_start_frame to where we actually landed
+        effective_start_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        print(f"[INFO] Analiz başlangıç karesi ayarlandı: {effective_start_frame}")
     else:
-         print(f"[INFO] Analiz 0. kareden başlıyor.")
-         actual_start_frame = 0
+         # This case likely won't happen if drop_ref_frame_index >= 0 and fps > 0
+         print(f"[INFO] Analiz 0. kareden başlıyor (Hesaplanan başlangıç: {effective_start_frame}).")
+         effective_start_frame = 0
+         cap.set(cv2.CAP_PROP_POS_FRAMES, 0) # Ensure position is 0
+
 
     motion_matrix = np.zeros((SECONDS, 9), dtype=int)
     frame_motion_buffers = [[] for _ in range(9)]
-    prev_rois = [None] * 9
+    prev_harris_scores = [None] * 9
     grid_cell_coords = split_grid(TARGET_SIZE)
 
     second_counter = 0
@@ -190,7 +207,7 @@ def main():
     initial_homography_found = False
     temp_cap = cv2.VideoCapture(VIDEO_PATH)
     if temp_cap.isOpened():
-        temp_cap.set(cv2.CAP_PROP_POS_FRAMES, actual_start_frame)
+        temp_cap.set(cv2.CAP_PROP_POS_FRAMES, effective_start_frame)
         for _ in range(int(fps) * 2):
             ret_h, frame_h = temp_cap.read()
             if not ret_h: break
@@ -205,7 +222,7 @@ def main():
     if not initial_homography_found:
          print("[WARN] İlk homografi bulunamadı.")
 
-    print(f"[INFO] İlk referans kare ({actual_start_frame}) işleniyor...")
+    print(f"[INFO] İlk referans kare ({effective_start_frame}) işleniyor...")
     ret, first_frame = cap.read()
     initial_frame_processed = False
     if ret:
@@ -213,12 +230,14 @@ def main():
         if rectified_first is not None:
             print("[INFO] İlk kare başarıyla düzeltildi.")
             gray_first = cv2.cvtColor(rectified_first, cv2.COLOR_BGR2GRAY)
-            temp_rois = [None] * 9
+            temp_scores = [0] * 9
             for i, (y1, y2, x1, x2) in enumerate(grid_cell_coords):
-                temp_rois[i] = gray_first[y1:y2, x1:x2]
-            prev_rois = temp_rois
+                gray_roi = gray_first[y1:y2, x1:x2]
+                score = calculate_harris_score(gray_roi)
+                temp_scores[i] = score
+            prev_harris_scores = temp_scores
             initial_frame_processed = True
-            print("[INFO] İlk kare ROI'ları ayarlandı.")
+            print(f"[INFO] İlk kare Harris skorları hesaplandı: {prev_harris_scores}")
         else:
             print("[WARN] İlk referans kare düzeltilemedi. İlk karşılaştırma yapılamayacak.")
     else:
@@ -243,21 +262,23 @@ def main():
                  print(f"[WARN] Düzeltme {rectification_failures} kez başarısız oldu (son 1sn).")
             processed_frame_count += 1
             frame_counter_in_second += 1
-
         else:
             rectification_failures = 0
             gray_rect = cv2.cvtColor(rectified_frame, cv2.COLOR_BGR2GRAY)
             display_frame = rectified_frame.copy()
             current_frame_motions = [0] * 9
-            current_rois = [None] * 9
+            current_harris_scores = [0] * 9
 
             for i, (y1, y2, x1, x2) in enumerate(grid_cell_coords):
-                roi = gray_rect[y1:y2, x1:x2]
-                current_rois[i] = roi
+                gray_roi = gray_rect[y1:y2, x1:x2]
+                score = calculate_harris_score(gray_roi)
+                current_harris_scores[i] = score
+                score_diff = 0
 
-                moved = detect_motion(prev_rois[i], roi, epsilon=ROBOT_THRESHOLDS[i])
-                if moved:
-                    current_frame_motions[i] = 1
+                if prev_harris_scores[i] is not None:
+                    score_diff = abs(score - prev_harris_scores[i])
+                    if score_diff > HARRIS_DIFF_THRESHOLD:
+                        current_frame_motions[i] = 1
 
                 color = (0, 255, 0) if current_frame_motions[i] == 1 else (0, 0, 255)
                 thickness = 2 if current_frame_motions[i] == 1 else 1
@@ -265,7 +286,7 @@ def main():
                 cv2.putText(display_frame, str(display_index_map[i]),
                             (x1 + 5, y1 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-            prev_rois = current_rois
+            prev_harris_scores = current_harris_scores
 
             for i in range(9):
                  frame_motion_buffers[i].append(current_frame_motions[i])
@@ -330,7 +351,6 @@ def main():
     if os.path.exists(ref_path):
         print("-" * 30)
         try:
-            # Assuming compare_outputs.py is in the same directory or Python path
             from compare_outputs import compare_outputs
             print(f"[INFO] Karşılaştırma başlıyor: {ref_path} vs {OUTPUT_TXT}")
             compare_outputs(ref_path, OUTPUT_TXT)
