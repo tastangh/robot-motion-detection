@@ -291,7 +291,7 @@ def main():
                  frame_motion_buffers[i].append(current_frame_motions[i])
 
             cv2.putText(display_frame, f"Saniye: {second_counter + 1}/{SECONDS}", (10, display_frame.shape[0] - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
-            cv2.putText(display_frame, f"Kare: {int(current_loop_frame_index)} (İşlenen: {processed_frame_count+1})", (10, display_frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
+            cv2.putText(display_frame, f"Kare: {int(current_loop_frame_index)} (islenen: {processed_frame_count+1})", (10, display_frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
             cv2.imshow("Robot Hareket Tespiti (Düzeltilmiş Görünüm)", display_frame)
 
             processed_frame_count += 1
